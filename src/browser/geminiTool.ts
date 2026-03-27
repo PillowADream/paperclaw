@@ -20,6 +20,7 @@ import { createBrowserSession } from "./session.js";
 export interface RunGeminiWebTaskOptions {
   forceNewChat?: boolean;
   forceModelOnResume?: boolean;
+  retryOnResumeTimeout?: boolean;
 }
 
 interface StageContext {
@@ -584,11 +585,14 @@ async function fillPrompt(input: Locator, prompt: string): Promise<void> {
     await input.fill(prompt, { timeout: 5_000 });
     return;
   }
-  await input.evaluate((element) => {
+  await input.evaluate((element, nextPrompt) => {
     const htmlElement = element as HTMLElement;
+    htmlElement.focus();
     htmlElement.textContent = "";
-  });
-  await input.pressSequentially(prompt, { delay: 15 });
+    htmlElement.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, data: "", inputType: "deleteContentBackward" }));
+    htmlElement.textContent = nextPrompt;
+    htmlElement.dispatchEvent(new InputEvent("input", { bubbles: true, data: nextPrompt, inputType: "insertText" }));
+  }, prompt);
 }
 
 async function submitPrompt(page: Page, input: Locator): Promise<string> {
@@ -865,7 +869,7 @@ async function archiveSuccessfulTurn(
 
     addDiagnostic(
       ctx,
-      `archive success threadId=${archiveResult.threadId ?? "unknown"} turn=${archiveResult.turnIndex ?? -1} summaryUpdated=${archiveResult.summaryUpdated} chunks=${archiveResult.chunksCreated} pgvector=${archiveResult.pgvectorEnabled}`
+      `archive success threadId=${archiveResult.threadId ?? "unknown"} turn=${archiveResult.turnIndex ?? -1} summaryUpdated=${archiveResult.summaryUpdated} chunks=${archiveResult.chunksCreated} pgvector=${archiveResult.pgvectorEnabled} embeddingBatchSize=${archiveResult.embeddingBatchSize ?? "n/a"} embeddingBatchCount=${archiveResult.embeddingBatchCount ?? "n/a"}`
     );
 
     if (archiveResult.degradedFeatures.length) {
@@ -914,6 +918,32 @@ export async function runGeminiWebTask(prompt: string, options: RunGeminiWebTask
   } catch (error) {
     const automationError = toAutomationError(error, ctx.currentStage);
     addDiagnostic(ctx, `failed stage=${automationError.stage} kind=${automationError.kind} reason=${automationError.message}`);
+
+    const canRetryWithNewChat =
+      options.retryOnResumeTimeout !== false &&
+      !options.forceNewChat &&
+      ctx.runMode === "resume" &&
+      automationError.stage === "wait-response-complete" &&
+      automationError.kind === "timeout";
+
+    if (canRetryWithNewChat) {
+      addDiagnostic(ctx, "resume response timed out; retrying once with --new-chat fallback");
+      try {
+        const retryResult = await runGeminiWebTask(prompt, {
+          ...options,
+          forceNewChat: true,
+          retryOnResumeTimeout: false
+        });
+        return {
+          ...retryResult,
+          diagnostics: [...diagnostics, ...(retryResult.diagnostics ?? [])]
+        };
+      } catch (retryError) {
+        const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
+        addDiagnostic(ctx, `new-chat retry failed: ${retryMessage}`);
+      }
+    }
+
     try {
       await persistFailureState(ctx, automationError);
     } catch (persistError) {

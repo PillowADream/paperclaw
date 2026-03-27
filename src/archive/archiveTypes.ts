@@ -71,6 +71,8 @@ export interface ArchiveTurnResult {
   summaryUpdated: boolean;
   chunksCreated: number;
   pgvectorEnabled: boolean;
+  embeddingBatchSize?: number;
+  embeddingBatchCount?: number;
   degradedFeatures: string[];
   message?: string;
 }
@@ -135,5 +137,7 @@ export interface ArchiveReembedResult {
   scanned: number;
   updated: number;
   remainingEstimate: number;
+  embeddingBatchSize?: number;
+  embeddingBatchCount?: number;
   degradedFeatures: string[];
 }

@@ -1,6 +1,6 @@
 # Gemini Web Agent MVP
 
-This repository contains a minimal runnable Gemini web automation agent built with TypeScript, Node.js, LangChain, Browser Use, and Playwright. It now includes a PostgreSQL-based conversation archive so each Gemini thread can be stored, summarized, chunked, and queried later without replacing the real-browser workflow.
+This repository contains a minimal runnable Gemini web automation agent built with TypeScript, Node.js, LangChain, Browser Use, and Playwright. It now includes a PostgreSQL-based conversation archive so each Gemini thread can be stored, summarized, chunked, and queried later without replacing the real-browser workflow. It also includes a minimal paper loop engine layered on top of the existing Gemini web executor and archive.
 
 Current target:
 - Controller model: DeepSeek
@@ -17,6 +17,9 @@ Current scope:
 - Persist runtime session state to `runtime/session.json`
 - Archive each successful user/assistant turn into PostgreSQL
 - Maintain thread summaries and retrieval-ready text chunks
+- Run resumable paper-writing loops with structured phase outputs
+- Inspect persisted loop traces without rerunning Gemini
+- Persist best-effort loop quality metrics for debugging and evaluation
 
 Out of scope for this MVP:
 - Automatic login
@@ -50,6 +53,22 @@ project-root/
       archiveChunker.ts
       archiveSummarizer.ts
       archiveService.ts
+    loops/
+      paperLoopTypes.ts
+      paperLoopState.ts
+      paperLoopRunner.ts
+      loopStore.ts
+      quality/
+        loopQualityLogger.ts
+      trace/
+        paperTrace.ts
+        paperTraceFormatter.ts
+        paperTraceTypes.ts
+      agents/
+        recallAgent.ts
+        surveyAgent.ts
+        writerAgent.ts
+        criticAgent.ts
     browser/
       geminiTool.ts
       geminiSessionState.ts
@@ -88,6 +107,7 @@ EMBEDDING_MODEL=text-embedding-3-small
 EMBEDDING_BASE_URL=https://api.openai.com/v1
 EMBEDDING_DIMENSIONS=1536
 ARCHIVE_EMBEDDING_TIMEOUT_MS=20000
+ARCHIVE_EMBEDDING_BATCH_SIZE=10
 ARCHIVE_ENABLE_ROUTING=true
 ARCHIVE_ROUTER_CANDIDATE_LIMIT=8
 ARCHIVE_ROUTER_RECALL_LIMIT=12
@@ -98,6 +118,10 @@ ARCHIVE_CHUNK_SIZE=1200
 ARCHIVE_CHUNK_OVERLAP=200
 ARCHIVE_SUMMARY_EVERY_TURNS=1
 ARCHIVE_SUMMARY_TIMEOUT_MS=15000
+PAPER_DEFAULT_SECTION=Introduction
+PAPER_LOOP_MAX_ITERATIONS=3
+PAPER_LOOP_RECALL_LIMIT=4
+PAPER_LOOP_THREAD_SEARCH_LIMIT=3
 
 GEMINI_WEB_URL=https://gemini.google.com/app
 BROWSER_PROFILE_DIR=./browser-profile
@@ -119,15 +143,22 @@ Notes:
 - If embedding env vars are omitted, the code falls back to the controller `LLM_API_KEY` and `LLM_BASE_URL`, but that only works when the provider also supports embeddings.
 - `EMBEDDING_DIMENSIONS` must match the vector size expected by the embedding model and pgvector column.
 - `ARCHIVE_EMBEDDING_TIMEOUT_MS` bounds chunk and query embedding calls.
+- `ARCHIVE_EMBEDDING_BATCH_SIZE` caps how many chunk texts are sent in one embedding request. Some providers reject batches larger than 10.
+- Gemini archive diagnostics now include the effective embedding batch size and batch count for each archived turn.
 - `ARCHIVE_ENABLE_ROUTING=true` enables archive-backed thread selection before the browser opens Gemini.
 - `ARCHIVE_ROUTER_CANDIDATE_LIMIT` controls how many recent archived threads are inspected during routing.
 - `ARCHIVE_ROUTER_RECALL_LIMIT` controls how many cross-thread recall hits are loaded before reranking.
 - `ARCHIVE_ROUTER_ENABLE_RERANK=true` enables an LLM judge over the top recalled candidates.
 - `ARCHIVE_ROUTER_RERANK_LIMIT` controls how many recalled threads are sent to the LLM reranker.
 - `ARCHIVE_ROUTER_RERANK_TIMEOUT_MS` bounds the reranker call so routing can still fall back quickly.
+- `PAPER_DEFAULT_SECTION` is used by `paper:init` unless `--section` is provided.
+- `PAPER_LOOP_MAX_ITERATIONS` is the default loop limit for `paper:run`.
+- `PAPER_LOOP_RECALL_LIMIT` controls how many archived threads are recalled per recall phase.
+- `PAPER_LOOP_THREAD_SEARCH_LIMIT` controls how many recent archived excerpts are pulled per recalled thread.
 - `BROWSER_PROFILE_DIR` should point to the Edge user-data root directory if you want to reuse an existing logged-in Edge profile.
 - `BROWSER_PROFILE_NAME` should point to the exact logged-in profile, such as `Default` or `Profile 1`.
-- Close other Edge windows using the same profile before running, otherwise the profile can be locked.
+- When `BROWSER_PROFILE_DIR` points to the system Edge user-data root, the runtime prefers a snapshot copy under `runtime/browser-profile-snapshot/` to avoid live profile conflicts. For local project profiles it still tries direct launch first, then falls back to a snapshot if needed.
+- Closing other Edge windows is still preferred because a fresh direct launch is faster and keeps the live profile state in sync.
 
 ## Edge Profile
 
@@ -252,6 +283,8 @@ Summary generation:
 - Uses the existing DeepSeek/LangChain stack through `@langchain/openai`.
 - Runs after base message archive succeeds.
 - Has a timeout via `ARCHIVE_SUMMARY_TIMEOUT_MS`.
+- The LLM prompt is intentionally compact and only uses the most recent conversation slice.
+- If the LLM summary call times out or returns invalid JSON, the system falls back to a local heuristic summary so archive writes can still produce retrieval metadata.
 - Failure is downgraded and does not block the main Gemini workflow.
 
 Chunk generation:
@@ -261,6 +294,7 @@ Chunk generation:
 
 Embeddings and pgvector:
 - When `ARCHIVE_ENABLE_EMBEDDINGS=true` and pgvector is available, each stored chunk is followed by a best-effort embedding update.
+- Chunk embedding requests are split into batches of `ARCHIVE_EMBEDDING_BATCH_SIZE` to stay within provider request limits.
 - Embedding failure does not block message archive.
 - Cross-thread routing can combine text recall with vector recall when embeddings exist.
 
@@ -293,6 +327,140 @@ npm run archive:reembed -- --limit 50
 ```
 
 This scans up to `limit` chunks with `embedding IS NULL`, generates embeddings, writes them into pgvector, and returns how many remain.
+
+## Paper Loop
+
+The paper loop is additive. It does not replace the Gemini main flow, does not introduce a new memory system, and still uses the real Gemini web browser execution path for writing phases.
+
+Phases:
+- `CONTEXT_RECALL`
+- `LITERATURE_SURVEY`
+- `DRAFT_SECTION`
+- `CRITIQUE_AND_REVISE`
+
+State machine:
+- `IDEA`
+- `CONTEXT_RECALL`
+- `LITERATURE_SURVEY`
+- `DRAFT_SECTION`
+- `CRITIQUE_AND_REVISE`
+- `STOP_CHECK`
+
+Behavior:
+- `CONTEXT_RECALL` reuses the existing archive recall APIs over archived Gemini threads.
+- `LITERATURE_SURVEY`, `DRAFT_SECTION`, and `CRITIQUE_AND_REVISE` each call the existing Gemini web browser executor and require JSON output from Gemini.
+- Every phase writes one row into `loop_runs`.
+- Every row contains `input_json`, `output_json`, `reflection_json`, `iteration`, `phase`, and `selected_thread_id`.
+- Every phase also attempts a best-effort write into `loop_run_metrics`.
+- Task progress is tracked in `research_tasks`.
+- If a run stops mid-loop, rerunning `paper:run` resumes from the next unfinished phase based on persisted history.
+- Metrics writes are non-fatal. A metrics failure logs to stderr and the paper loop continues.
+
+### Paper Loop Schema
+
+Initialization is automatic and idempotent.
+
+`research_tasks`
+- `task_id`
+- `title`
+- `problem_statement`
+- `target_section`
+- `status`
+- `current_phase`
+- `current_iteration`
+- `created_at`
+- `updated_at`
+
+`loop_runs`
+- `run_id`
+- `task_id`
+- `iteration`
+- `phase`
+- `input_json`
+- `output_json`
+- `reflection_json`
+- `selected_thread_id`
+- `created_at`
+
+`loop_run_metrics`
+- `metric_id`
+- `loop_run_id` nullable foreign key to `loop_runs`
+- `task_id`
+- `iteration`
+- `phase`
+- `phase_status`
+- `phase_latency_ms`
+- `json_repair_used`
+- `json_repair_succeeded`
+- `recalled_thread_count`
+- `recalled_chunk_count` nullable, reserved for future direct chunk-level recall data
+- `recalled_excerpt_count`
+- `selected_thread_id`
+- `critic_issue_count`
+- `critic_missing_evidence_count`
+- `output_size_chars`
+- `reflection_risk_level`
+- `stop_reason`
+- `failure_reason`
+- `created_at`
+
+### Paper Loop Commands
+
+Create a research task:
+
+```bash
+npm run paper:init -- --title "RAG for literature review" --problem "How can archive-grounded Gemini loops improve paper drafting?" --section "Introduction"
+```
+
+Run up to three iterations:
+
+```bash
+npm run paper:run -- task:your-task-id --iterations 3
+```
+
+Inspect task status and loop history:
+
+```bash
+npm run paper:status -- task:your-task-id
+```
+
+Trace one persisted task without opening Gemini:
+
+```bash
+npm run paper:trace -- task:your-task-id
+```
+
+Trace one iteration or phase only:
+
+```bash
+npm run paper:trace -- task:your-task-id --iteration 2
+npm run paper:trace -- task:your-task-id --phase DRAFT_SECTION
+```
+
+Emit machine-readable JSON:
+
+```bash
+npm run paper:trace -- task:your-task-id --json
+```
+
+`paper:init`, `paper:run`, and `paper:status` print JSON. `paper:trace` defaults to a readable trace with task summary, run overview, per-iteration phase details, recall notes, JSON repair flags, reflections, and final stop status.
+
+### Paper Trace And Quality Metrics
+
+`paper:trace` is read-only. It loads `research_tasks`, `loop_runs`, and `loop_run_metrics` from PostgreSQL and never opens the browser or replays Gemini work.
+
+Current quality metrics recorded per phase:
+- `phase_status` and `failure_reason` to see which phase failed or degraded
+- `phase_latency_ms` to spot slow phases
+- `json_repair_used` and `json_repair_succeeded` to identify malformed Gemini JSON and whether repair recovered
+- `recalled_thread_count` and `recalled_excerpt_count` to inspect recall context size
+- `selected_thread_id` to see which archived thread fed later phases
+- `critic_issue_count` and `critic_missing_evidence_count` to track critique pressure
+- `output_size_chars` to catch empty or trivially short phase outputs
+- `reflection_risk_level` as a lightweight heuristic over persisted reflections
+- `stop_reason` to explain why the loop stopped or continued after critique
+
+These metrics are intentionally lightweight. They help answer which phases fail most often, where JSON repair is clustering, whether recall returned enough context, whether critique is still surfacing unresolved evidence gaps, and whether a loop stopped because it was done or because it hit the iteration ceiling.
 
 ## Thread Routing
 
@@ -357,6 +525,8 @@ This keeps the MVP stable while leaving room for future vector indexing.
   - Archive orchestration, thread-id derivation, chunking, and retrieval APIs
 
 Browser Use remains the browser-layer dependency boundary. Playwright persistent context is used in the session wrapper because the current `browser-use-typescript` package does not cleanly expose persistent `user_data_dir` support through its public TS API.
+
+If a resumed Gemini conversation starts generating but never produces a stable new reply before timeout, the runtime retries once with `--new-chat` semantics. This keeps the main flow moving when an old saved thread becomes stuck while preserving resume-first behavior as the default.
 
 ## Verified
 

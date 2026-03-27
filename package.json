@@ -14,7 +14,11 @@
     "archive:list": "npm run build && node dist/index.js archive:list",
     "archive:thread": "npm run build && node dist/index.js archive:thread",
     "archive:search": "npm run build && node dist/index.js archive:search",
-    "archive:reembed": "npm run build && node dist/index.js archive:reembed"
+    "archive:reembed": "npm run build && node dist/index.js archive:reembed",
+    "paper:init": "npm run build && node dist/index.js paper:init",
+    "paper:run": "npm run build && node dist/index.js paper:run",
+    "paper:status": "npm run build && node dist/index.js paper:status",
+    "paper:trace": "npm run build && node dist/index.js paper:trace"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.888.0",

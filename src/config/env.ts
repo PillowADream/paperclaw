@@ -32,6 +32,10 @@ const envSchema = z.object({
     .string()
     .optional()
     .transform((value) => Number(value ?? "20000")),
+  ARCHIVE_EMBEDDING_BATCH_SIZE: z
+    .string()
+    .optional()
+    .transform((value) => Number(value ?? "10")),
   ARCHIVE_ENABLE_ROUTING: z
     .string()
     .optional()
@@ -72,6 +76,19 @@ const envSchema = z.object({
     .string()
     .optional()
     .transform((value) => Number(value ?? "15000")),
+  PAPER_DEFAULT_SECTION: z.string().optional().default("Introduction"),
+  PAPER_LOOP_MAX_ITERATIONS: z
+    .string()
+    .optional()
+    .transform((value) => Number(value ?? "3")),
+  PAPER_LOOP_RECALL_LIMIT: z
+    .string()
+    .optional()
+    .transform((value) => Number(value ?? "4")),
+  PAPER_LOOP_THREAD_SEARCH_LIMIT: z
+    .string()
+    .optional()
+    .transform((value) => Number(value ?? "3")),
   GEMINI_WEB_URL: z.string().url().default("https://gemini.google.com/app"),
   BROWSER_PROFILE_DIR: z.string().min(1).default("./browser-profile"),
   BROWSER_PROFILE_NAME: z.string().min(1).default("Default"),
@@ -133,6 +150,7 @@ export const appEnv = {
   embeddingBaseUrl: env.EMBEDDING_BASE_URL?.trim() || env.LLM_BASE_URL,
   embeddingDimensions: env.EMBEDDING_DIMENSIONS,
   archiveEmbeddingTimeoutMs: env.ARCHIVE_EMBEDDING_TIMEOUT_MS,
+  archiveEmbeddingBatchSize: env.ARCHIVE_EMBEDDING_BATCH_SIZE,
   archiveEnableRouting: env.ARCHIVE_ENABLE_ROUTING,
   archiveRouterCandidateLimit: env.ARCHIVE_ROUTER_CANDIDATE_LIMIT,
   archiveRouterRecallLimit: env.ARCHIVE_ROUTER_RECALL_LIMIT,
@@ -143,6 +161,10 @@ export const appEnv = {
   archiveChunkOverlap: env.ARCHIVE_CHUNK_OVERLAP,
   archiveSummaryEveryTurns: env.ARCHIVE_SUMMARY_EVERY_TURNS,
   archiveSummaryTimeoutMs: env.ARCHIVE_SUMMARY_TIMEOUT_MS,
+  paperDefaultSection: env.PAPER_DEFAULT_SECTION,
+  paperLoopMaxIterations: env.PAPER_LOOP_MAX_ITERATIONS,
+  paperLoopRecallLimit: env.PAPER_LOOP_RECALL_LIMIT,
+  paperLoopThreadSearchLimit: env.PAPER_LOOP_THREAD_SEARCH_LIMIT,
   geminiWebUrl: env.GEMINI_WEB_URL,
   browserProfileDir: path.resolve(env.BROWSER_PROFILE_DIR),
   browserProfileName: env.BROWSER_PROFILE_NAME,

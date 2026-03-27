@@ -71,6 +71,14 @@ export class ArchiveService {
   private readonly summarizer = new ArchiveSummarizer();
   private readonly embedder = getArchiveEmbedder();
 
+  private getEmbeddingBatchStats(itemCount: number): { embeddingBatchSize: number; embeddingBatchCount: number } {
+    const embeddingBatchSize = Math.max(1, appEnv.archiveEmbeddingBatchSize);
+    return {
+      embeddingBatchSize,
+      embeddingBatchCount: itemCount > 0 ? Math.ceil(itemCount / embeddingBatchSize) : 0
+    };
+  }
+
   async archiveTurn(input: ArchiveTurnInput): Promise<ArchiveTurnResult> {
     const status = await this.store.initialize();
     if (!status.enabled) {
@@ -181,6 +189,10 @@ export class ArchiveService {
     }
 
     const latestStatus = this.store.getStatus();
+    const embeddingBatchStats =
+      latestStatus.pgvectorEnabled && chunkRecords.length > 0
+        ? this.getEmbeddingBatchStats(chunkRecords.length)
+        : undefined;
 
     if (latestStatus.pgvectorEnabled && chunkRecords.length > 0) {
       try {
@@ -204,6 +216,8 @@ export class ArchiveService {
       summaryUpdated,
       chunksCreated,
       pgvectorEnabled: latestStatus.pgvectorEnabled,
+      embeddingBatchSize: embeddingBatchStats?.embeddingBatchSize,
+      embeddingBatchCount: embeddingBatchStats?.embeddingBatchCount,
       degradedFeatures: [...latestStatus.degradedFeatures, ...degradedFeatures],
       message: "archive turn completed"
     };
@@ -266,12 +280,15 @@ export class ArchiveService {
         scanned: 0,
         updated: 0,
         remainingEstimate: 0,
+        embeddingBatchSize: Math.max(1, appEnv.archiveEmbeddingBatchSize),
+        embeddingBatchCount: 0,
         degradedFeatures: status.degradedFeatures
       };
     }
 
     const degradedFeatures = [...status.degradedFeatures];
     let updated = 0;
+    const embeddingBatchStats = this.getEmbeddingBatchStats(pendingChunks.length);
 
     try {
       const embeddings = await this.embedder.embedTexts(pendingChunks.map((chunk) => chunk.chunkText));
@@ -302,6 +319,8 @@ export class ArchiveService {
       scanned: pendingChunks.length,
       updated,
       remainingEstimate,
+      embeddingBatchSize: embeddingBatchStats.embeddingBatchSize,
+      embeddingBatchCount: embeddingBatchStats.embeddingBatchCount,
       degradedFeatures
     };
   }

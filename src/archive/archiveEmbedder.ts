@@ -33,11 +33,21 @@ export class ArchiveEmbedder {
       return [];
     }
 
-    return withTimeout(
-      this.embeddings.embedDocuments(texts),
-      appEnv.archiveEmbeddingTimeoutMs,
-      "archive embeddings"
-    );
+    const batchSize = Math.max(1, appEnv.archiveEmbeddingBatchSize);
+    const vectors: number[][] = [];
+
+    for (let index = 0; index < texts.length; index += batchSize) {
+      const batch = texts.slice(index, index + batchSize);
+      const batchNumber = Math.floor(index / batchSize) + 1;
+      const batchVectors = await withTimeout(
+        this.embeddings.embedDocuments(batch),
+        appEnv.archiveEmbeddingTimeoutMs,
+        `archive embeddings batch ${batchNumber}`
+      );
+      vectors.push(...batchVectors);
+    }
+
+    return vectors;
   }
 
   async embedQuery(text: string): Promise<number[]> {

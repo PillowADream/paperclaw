@@ -2,15 +2,36 @@ import { appEnv } from "./config/env.js";
 import { runPlannedGeminiPrompt } from "./agent/planner.js";
 import { getArchiveService } from "./archive/archiveService.js";
 import { runGeminiWebTask } from "./browser/geminiTool.js";
+import { getPaperLoopRunner } from "./loops/paperLoopRunner.js";
+import { formatPaperTrace } from "./loops/trace/paperTraceFormatter.js";
+import { buildPaperTraceReport, parseTracePhase } from "./loops/trace/paperTrace.js";
+import type { PaperLoopPhase } from "./loops/paperLoopTypes.js";
 
 interface CliArgs {
-  mode: "gemini" | "archive:list" | "archive:thread" | "archive:search" | "archive:reembed";
+  mode:
+    | "gemini"
+    | "archive:list"
+    | "archive:thread"
+    | "archive:search"
+    | "archive:reembed"
+    | "paper:init"
+    | "paper:run"
+    | "paper:status"
+    | "paper:trace";
   prompt?: string;
   forceNewChat: boolean;
   forceModelOnResume: boolean;
   threadId?: string;
   query?: string;
   limit: number;
+  title?: string;
+  problem?: string;
+  taskId?: string;
+  iterations?: number;
+  section?: string;
+  json?: boolean;
+  iteration?: number;
+  phase?: PaperLoopPhase;
 }
 
 function sanitizeCliPrompt(prompt: string): string {
@@ -30,8 +51,8 @@ function sanitizeCliPrompt(prompt: string): string {
 
 function parseCliArgs(argv: string[]): CliArgs {
   const rawArgs = argv.slice(2);
-  const archiveMode = rawArgs[0];
-  if (archiveMode === "archive:list") {
+  const mode = rawArgs[0];
+  if (mode === "archive:list") {
     const limitIndex = rawArgs.indexOf("--limit");
     const limit = limitIndex >= 0 ? Number(rawArgs[limitIndex + 1] ?? "10") : 10;
     return {
@@ -41,7 +62,7 @@ function parseCliArgs(argv: string[]): CliArgs {
       limit
     };
   }
-  if (archiveMode === "archive:thread") {
+  if (mode === "archive:thread") {
     return {
       mode: "archive:thread",
       forceNewChat: false,
@@ -50,7 +71,7 @@ function parseCliArgs(argv: string[]): CliArgs {
       limit: 10
     };
   }
-  if (archiveMode === "archive:search") {
+  if (mode === "archive:search") {
     const threadFlagIndex = rawArgs.indexOf("--thread");
     const limitIndex = rawArgs.indexOf("--limit");
     const threadId = threadFlagIndex >= 0 ? rawArgs[threadFlagIndex + 1] : undefined;
@@ -74,7 +95,7 @@ function parseCliArgs(argv: string[]): CliArgs {
       limit
     };
   }
-  if (archiveMode === "archive:reembed") {
+  if (mode === "archive:reembed") {
     const limitIndex = rawArgs.indexOf("--limit");
     const limit = limitIndex >= 0 ? Number(rawArgs[limitIndex + 1] ?? "50") : 50;
     return {
@@ -82,6 +103,57 @@ function parseCliArgs(argv: string[]): CliArgs {
       forceNewChat: false,
       forceModelOnResume: false,
       limit
+    };
+  }
+  if (mode === "paper:init") {
+    const titleIndex = rawArgs.indexOf("--title");
+    const problemIndex = rawArgs.indexOf("--problem");
+    const sectionIndex = rawArgs.indexOf("--section");
+    return {
+      mode: "paper:init",
+      forceNewChat: false,
+      forceModelOnResume: false,
+      limit: 10,
+      title: titleIndex >= 0 ? sanitizeCliPrompt(rawArgs[titleIndex + 1] ?? "") : undefined,
+      problem: problemIndex >= 0 ? sanitizeCliPrompt(rawArgs[problemIndex + 1] ?? "") : undefined,
+      section: sectionIndex >= 0 ? sanitizeCliPrompt(rawArgs[sectionIndex + 1] ?? "") : undefined
+    };
+  }
+  if (mode === "paper:run") {
+    const iterationsIndex = rawArgs.indexOf("--iterations");
+    return {
+      mode: "paper:run",
+      forceNewChat: false,
+      forceModelOnResume: false,
+      limit: 10,
+      taskId: rawArgs[1],
+      iterations:
+        iterationsIndex >= 0
+          ? Number(rawArgs[iterationsIndex + 1] ?? `${appEnv.paperLoopMaxIterations}`)
+          : appEnv.paperLoopMaxIterations
+    };
+  }
+  if (mode === "paper:status") {
+    return {
+      mode: "paper:status",
+      forceNewChat: false,
+      forceModelOnResume: false,
+      limit: 10,
+      taskId: rawArgs[1]
+    };
+  }
+  if (mode === "paper:trace") {
+    const iterationIndex = rawArgs.indexOf("--iteration");
+    const phaseIndex = rawArgs.indexOf("--phase");
+    return {
+      mode: "paper:trace",
+      forceNewChat: false,
+      forceModelOnResume: false,
+      limit: 10,
+      taskId: rawArgs[1],
+      json: rawArgs.includes("--json"),
+      iteration: iterationIndex >= 0 ? Number(rawArgs[iterationIndex + 1] ?? "0") : undefined,
+      phase: parseTracePhase(phaseIndex >= 0 ? rawArgs[phaseIndex + 1] : undefined)
     };
   }
 
@@ -147,10 +219,60 @@ async function runArchiveCommand(args: CliArgs): Promise<void> {
   }
 }
 
+async function runPaperCommand(args: CliArgs): Promise<void> {
+  const runner = getPaperLoopRunner();
+
+  if (args.mode === "paper:init") {
+    const title = requireValue(args.title, "paper:init requires --title");
+    const problem = requireValue(args.problem, "paper:init requires --problem");
+    const task = await runner.createTask(title, problem, args.section?.trim() || appEnv.paperDefaultSection);
+    console.log(JSON.stringify(task, null, 2));
+    return;
+  }
+
+  const taskId = requireValue(args.taskId, `${args.mode} requires <task_id>`);
+
+  if (args.mode === "paper:run") {
+    const status = await runner.runTask(taskId, {
+      maxIterations: args.iterations
+    });
+    console.log(JSON.stringify(status, null, 2));
+    return;
+  }
+
+  if (args.mode === "paper:status") {
+    const status = await runner.getStatus(taskId);
+    if (!status) {
+      throw new Error(`research task not found: ${taskId}`);
+    }
+    console.log(JSON.stringify(status, null, 2));
+    return;
+  }
+
+  if (args.mode === "paper:trace") {
+    const trace = await buildPaperTraceReport(taskId, {
+      iteration: args.iteration,
+      phase: args.phase
+    });
+    if (!trace) {
+      throw new Error(`research task not found: ${taskId}`);
+    }
+    if (args.json) {
+      console.log(JSON.stringify(trace, null, 2));
+      return;
+    }
+    console.log(formatPaperTrace(trace));
+  }
+}
+
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv);
-  if (args.mode !== "gemini") {
+  if (args.mode.startsWith("archive:")) {
     await runArchiveCommand(args);
+    return;
+  }
+  if (args.mode.startsWith("paper:")) {
+    await runPaperCommand(args);
     return;
   }
 
